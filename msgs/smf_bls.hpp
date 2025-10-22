@@ -23,7 +23,6 @@
 #include <cybozu/stream.hpp>
 #include <vector>
 #include <cstring>
-//#include <mcl/window_method.hpp>
 
 typedef mcl::ecdsa::Fp Fp;
 typedef mcl::ecdsa::Zn Zn;
@@ -34,17 +33,15 @@ typedef mcl::bn::G2 G2;
 
 
 
-
+static const uint8_t* STRE;
 static bool flag1 = false;
 static bool flag2 = false;
 static bool flag3 = false;
-static bool flag4 = false;
 static size_t FSIZE = 1000;  // message size
 static size_t MSIZE = 4;    //  message-block numbers
 static size_t RSIZE = 1;    //  reporting block numbers;
 static size_t BSIZE;        //  message block size;
 static int* BSELECT;        // should be a vector, the reporting indexes
-
 
 
 void readBytes(uint8_t* buf, size_t size, std::ifstream& is) {
@@ -69,47 +66,30 @@ struct Sig {
     uint8_t* seed;
 };
 
-struct Elgamal_cipher {
-	Ec c1;
-	Ec c2;
-};
 // note the allowed byte count
 struct Srm {
+	//uint8_t m[10000];
+	//uint8_t kf[640];
+	//int index[20];
 	uint8_t* m;
 	uint8_t* kf;
 	int* index;
-	
-	Elgamal_cipher c;
 };
 
 struct SecretKey {
 	Zn x1;
-	Zn x2;
-};
-
-struct SecretKeyj {
-	Zn x2;
-};
-
-struct PublicKeyj {
-	mcl::fp::WindowMethod<Ec> wm_h2;
+	mcl::bn::Fr x2;
 };
 
 struct PublicKey {
-	mcl::fp::WindowMethod<Ec> wm_h1;
-	mcl::fp::WindowMethod<Ec> wm_h2;
+	mcl::fp::WindowMethod<Ec> wm_h;
+	G1 P;
+	G2 Q;
 };
-
-
 
 struct KeyPair {
 	SecretKey sk;
 	PublicKey pk;
-};
-
-struct KeyPairj {
-	SecretKeyj sk;
-	PublicKeyj pk;
 };
 
 struct State {
@@ -119,22 +99,33 @@ struct State {
 
 struct PP {
     mcl::fp::WindowMethod<Ec> wm_g;
-   
+    //mcl::fp::WindowMethod<Ec> wm_h;
+    mcl::bn::G1 P;
+    mcl::bn::G2 Q;
 };
 
 struct Aux {
-	uint8_t* key;  // commitment key
-	uint8_t* mac; // the result tag
-	uint8_t* hm; // shared key (i.e., the franking message)
-	Ec u;
-	
+	uint8_t* key;  // committing key
+	uint8_t* mac; // the result tag (i.e., tags)
+	uint8_t* hm; // shared key (i.e., the salt u)
 };
 
 
 void Setup(PP& pp) {
 	Ec G;
 	mcl::initCurve<Ec>(para.curveType, &G);
-    pp.wm_g.init(G, 256, 10); 
+    //const size_t bitSize = Zn::getBitSize();
+    //Zn sec;
+    //sec.setRand();
+    //PP pp;
+    pp.wm_g.init(G, 256, 10);
+    //Ec::mul(H,G, sec);
+    //pp.wm_g.mul(H, sec);
+    //pp.wm_h.init(H,bitSize, 10);
+    mcl::bn::initPairing(mcl::BLS12_381);
+    mcl::bn::mapToG1(pp.P, 1);
+    mcl::bn::mapToG2(pp.Q, 1);
+    
 }
 
 
@@ -143,26 +134,14 @@ KeyPair KG(PP& pp) {
 	SecretKey sk;
 	PublicKey pk;
 	sk.x1.setRand(); sk.x2.setRand();
-	Ec pub_1, pub_2;
-	pp.wm_g.mul(pub_1, sk.x1);
-	pp.wm_g.mul(pub_2, sk.x2);
-	pk.wm_h1.init(pub_1, 256,10);
-	pk.wm_h2.init(pub_2, 256,10);
+	Ec pub;
+	pp.wm_g.mul(pub, sk.x1);
+	pk.wm_h.init(pub, 256,10);
+	G1::mul(pk.P, pp.P, sk.x2);
+	G2::mul(pk.Q, pp.Q, sk.x2);
 	return KeyPair {sk, pk};
 	  
 }
-
-KeyPairj KGj(PP& pp) {
-	SecretKeyj sk;
-	PublicKeyj pk;
-	sk.x2.setRand();
-	Ec pub_2;
-	pp.wm_g.mul(pub_2, sk.x2);
-	pk.wm_h2.init(pub_2, 256,10);
-	return KeyPairj {sk, pk};
-	  
-}
-
 
 
 void Sg(PP& pp, Sig& sig, const unsigned char* msg, Zn& sk) {
@@ -207,7 +186,7 @@ bool Sv(PP& pp, PublicKey& pk, const Sig& sig, const unsigned char* msg) {
 		pp.wm_g.mul(Q1, u1);
 		//	Ec::mul(Q2, pub, u2);
 		//mcl::ecdsa::local::mulDispatch(Q2, pub, u2);
-		pk.wm_h1.mul(Q2, u2);
+		pk.wm_h.mul(Q2, u2);
 		Q1 += Q2;
 		if (Q1.isZero()) return false;
 		Q1.normalize();
@@ -232,7 +211,7 @@ bool Sv(PP& pp, PublicKey& pk, const Sigma& sigma, const unsigned char* msg) {
 		pp.wm_g.mul(Q1, u1);
 		//	Ec::mul(Q2, pub, u2);
 		//mcl::ecdsa::mulDispatch(Q2, pub, u2);
-		pk.wm_h1.mul(Q2, u2);
+		pk.wm_h.mul(Q2, u2);
 		Q1 += Q2;
 		if (Q1.isZero()) return false;
 		Q1.normalize();
@@ -261,16 +240,36 @@ void Tg(uint8_t* key, uint8_t* seed, const uint8_t* msg, uint8_t* mac) {
 
 bool Tv(const Srm& srm, const uint8_t* mac) {
 	int j = 0;
-	size_t t = 0;
-	while(1) {
-		int i = srm.index[t++];
+	/*
+	for(int i : srm.index) {
 		if(i == -1) break;
-		
 		uint8_t* k = (uint8_t*)srm.kf+j*32;
+		//const unsigned char* ms = srm.m+j*32;
 		const unsigned char* ms = srm.m+j*BSIZE;
 		
 		const uint8_t* tag = mac+i*32;
 		if(!verify_hmac(k, ms, BSIZE, tag)) {
+			//printf("Bad %d\n", i);
+			return false;
+		}
+		j++;
+	}
+	*/
+	
+	size_t t = 0;
+	while(1) {
+		//if(i == -1) break;
+		//if(t == RSIZE) break;
+		int i = srm.index[t++];
+		if(i == -1) break;
+		
+		uint8_t* k = (uint8_t*)srm.kf+j*32;
+		//const unsigned char* ms = srm.m+j*32;
+		const unsigned char* ms = srm.m+j*BSIZE;
+		
+		const uint8_t* tag = mac+i*32;
+		if(!verify_hmac(k, ms, BSIZE, tag)) {
+			//printf("Bad %d\n", i);
 			return false;
 		}
 		j++;
@@ -282,93 +281,136 @@ bool Tv(const Srm& srm, const uint8_t* mac) {
 
 
 void Frank(PP& pp, Aux& aux, Sig& sig, SecretKey& sec, PublicKey& pkr, 
-           PublicKeyj& pkj, uint8_t* msg) {
+           PublicKey& pkj, uint8_t* msg) {
 	RAND_priv_bytes(sig.seed, 32);
 	Tg(aux.key, sig.seed, msg, aux.mac);
 	if(!flag1) {
-	    
-	    Ec u;
-	    pkr.wm_h2.mul(u, sec.x2);
-	    
-	    u.serialize(aux.hm, 256);
+	    mcl::bn::Fp12 e1;
+	    //mcl::bn::initPairing(mcl::BN254);
+	    mcl::bn::pairing(e1, pkr.P,pkj.Q);
+	    mcl::bn::Fp12::pow(e1, e1, sec.x2);
+	    e1.serialize(aux.hm, 600);
 	    flag1 = true;
 	}
 	
 	for(int i =0; i < 32*MSIZE; i++) {
-		aux.hm[i+256] = aux.mac[i];
+		aux.hm[i+576] = aux.mac[i];
 	}
 	Sg(pp, sig, aux.hm, sec.x1);
 }
 
 
 bool Verify(PP& pp, Aux& aux, Sig& sig, SecretKey& sec, PublicKey& pks, 
-            PublicKeyj& pkj, uint8_t* msg) {
+            PublicKey& pkj, uint8_t* msg) {
 	    Tg(aux.key, sig.seed, msg, aux.mac);
 		if(!flag2) {
-			Ec u;
-	        pks.wm_h2.mul(u, sec.x2);
-	        u.serialize(aux.hm, 256);
+			mcl::bn::Fp12 e1;
+			mcl::bn::pairing(e1, pks.P,pkj.Q);
+			mcl::bn::Fp12::pow(e1, e1, sec.x2);
+			e1.serialize(aux.hm, 600);
 			flag2 = true;
 		}
 		
 		for(int i = 0; i < 32*MSIZE; i++) {
-			aux.hm[i+256] = aux.mac[i];
+			aux.hm[i+576] = aux.mac[i];
 	   }
 		return Sv(pp, pks, sig, aux.hm);		
 }
 
 
 void Report(Aux& aux, Srm& srm, Sigma& sigma, const uint8_t* msg, 
-            const int T[], const Sig& sig, PP& pp, PublicKey& pks, PublicKeyj& pkj, SecretKey& skr) {
+            const int T[], const Sig& sig) {
 	Tg(aux.key, sig.seed, msg, aux.mac);
 	int h = 0;
-	if(!flag4) {
-
-	    pks.wm_h2.mul(aux.u, skr.x2);
-	    flag4 = true;
-	}
-	Ec c1, c2;
-	Zn r; 
-	r.setRand();
-	pp.wm_g.mul(c1, r); pkj.wm_h2.mul(c2, r);
-	c2 += aux.u;
-	int t = 0;
-	while(1) {
-		int i = T[t++];
+	/*
+	for(int i: BSELECT) {
+		
 		if(i == -1) break;
+		//int j = 0;
 		srm.index[h] = i;
 		for(int j = 0; j < 32; j++) {
-			
+			//k = i*32;
 			srm.kf[h*32+j] = aux.key[i*32+j];
-			
+			//srm.m[h*BSIZE+j] = msg[i*BSIZE+j];
 		}
 		for(int j = 0; j < BSIZE; j++) {
 			srm.m[h*BSIZE+j] = msg[i*BSIZE+j];
 		}
 		h++;
 	}
-	
+	//srm.m[h*32] = '\0';
+	srm.index[h] = -1;
+	//free(sig.seed);
+	//sig.seed = NULL;
+	sigma.r = sig.r;
+	sigma.s = sig.s;
+	*/
+	int t = 0;
+	while(1) {
+		int i = T[t++];
+		if(i == -1) break;
+		srm.index[h] = i;
+		for(int j = 0; j < 32; j++) {
+			//k = i*32;
+			srm.kf[h*32+j] = aux.key[i*32+j];
+			//srm.m[h*BSIZE+j] = msg[i*BSIZE+j];
+		}
+		for(int j = 0; j < BSIZE; j++) {
+			srm.m[h*BSIZE+j] = msg[i*BSIZE+j];
+		}
+		h++;
+	}
 	srm.index[h] = -1;
 	sigma.r = sig.r;
 	sigma.s = sig.s;
-	srm.c  = {c1,c2};
 }
 
 
-bool Judge(PP& pp, Aux& aux, SecretKeyj& sec, PublicKey& pks, PublicKey& pkr, 
+/*
+void Report(Aux& aux, Srm& srm, Sigma& sigma, const uint8_t* msg, 
+            const int T[], const Sig& sig) {
+	Tg(aux.key, sig.seed, msg, aux.mac);
+	int h = 0; 
+	for(int i: BSELECT) {
+		
+		if(i == -1) break;
+		//int j = 0;
+		srm.index[h] = i;
+		//*(indice+h) = i;
+		for(int j = 0; j < 32; j++) {
+			//k = i*32;
+			srm.kf[h*32+j] = aux.key[i*32+j];
+			//srm.m[h*BSIZE+j] = msg[i*BSIZE+j];
+		}
+		for(int j = 0; j < BSIZE; j++) {
+			srm.m[h*BSIZE+j] = msg[i*BSIZE+j];
+		}
+		h++;
+	}
+	//srm.m[h*32] = '\0';
+	//srm.index[h] = -1;
+	//free(sig.seed);
+	//sig.seed = NULL;
+	sigma.r = sig.r;
+	sigma.s = sig.s;
+}
+*/
+
+bool Judge(PP& pp, Aux& aux, SecretKey& sec, PublicKey& pks, PublicKey& pkr, 
            const Srm& srm, const Sigma& sigma) {
 	if(!Tv(srm, aux.mac)) {
 		return false;
 	}
-	
-	Ec u, c1 = srm.c.c1;
-	c1.normalize();
-	Ec::mul(c1, c1, sec.x2);
-	Ec::sub(u, srm.c.c2, c1);
-	u.serialize(aux.hm, 256);
+	if(!flag3) {
+		mcl::bn::Fp12 e1;
+		mcl::bn::pairing(e1, pks.P,pkr.Q);
+		mcl::bn::Fp12::pow(e1, e1, sec.x2);
+		e1.serialize(aux.hm, 600);
+		flag3 = true;
+	}
 	
 	for(int i = 0; i < 32*MSIZE; i++) {
-		aux.hm[i+256] = aux.mac[i];
+		aux.hm[i+576] = aux.mac[i];
 	}
 	
 	return Sv(pp, pks, sigma, aux.hm);		   
