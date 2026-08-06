@@ -180,4 +180,63 @@ int verify_hmac(uint8_t* key, const unsigned char *msg, size_t mlen, const unsig
     return result;
 }
 
+// SHAKE256 XOF 可扩展输出实现
+int shake256_xof(const uint8_t *msg, size_t mlen, uint8_t *out, size_t out_len)
+{
+    if (!msg || !out || out_len == 0)
+    {
+        fprintf(stderr, "shake256_xof null param\n");
+        return 0;
+    }
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    if (!ctx) handleErrors();
+
+    if (EVP_DigestInit_ex(ctx, EVP_shake256(), NULL) != 1)
+        handleErrors();
+    if (EVP_DigestUpdate(ctx, msg, mlen) != 1)
+        handleErrors();
+
+    // 一次性读取目标长度，不再循环
+    unsigned int req = (unsigned int)out_len;
+    if (EVP_DigestFinalXOF(ctx, out, req) != 1)
+        handleErrors();
+
+    EVP_MD_CTX_free(ctx);
+    return 1;
+}
+
+// SHA256 迭代扩展输出，替代shake256_xof
+int sha256_expand(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_len)
+{
+    if (!in || !out || out_len == 0)
+    {
+        fprintf(stderr, "sha256_expand null input\n");
+        return 0;
+    }
+    uint8_t tmp_in[1024];
+    memcpy(tmp_in, in, in_len);
+    size_t pos = 0;
+    uint8_t counter = 0;
+    while (pos < out_len)
+    {
+        EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+        if (!ctx) handleErrors();
+        EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
+        // 输入 = 原始数据 || counter
+        EVP_DigestUpdate(ctx, tmp_in, in_len);
+        EVP_DigestUpdate(ctx, &counter, 1);
+        uint8_t hash[32];
+        unsigned int hash_len;
+        EVP_DigestFinal_ex(ctx, hash, &hash_len);
+        EVP_MD_CTX_free(ctx);
+
+        size_t copy = (out_len - pos) > 32 ? 32 : (out_len - pos);
+        memcpy(out + pos, hash, copy);
+        pos += copy;
+        counter++;
+    }
+    return 1;
+}
+
+
 
